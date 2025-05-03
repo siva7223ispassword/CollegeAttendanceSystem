@@ -1,0 +1,2375 @@
+import os
+import re
+import bcrypt
+import mysql.connector
+from dotenv import load_dotenv
+import customtkinter as ctk
+from datetime import datetime, timedelta
+import random
+import string
+import tkinter as ttk
+from tkcalendar import DateEntry
+from tkinter import messagebox, StringVar, IntVar
+from PIL import Image, ImageTk
+
+# Load environment variables
+load_dotenv()
+
+# Database connection
+def get_db_connection():
+    try:
+        connection = mysql.connector.connect(
+            host=os.getenv("MYSQL_HOST"),
+            user=os.getenv("MYSQL_USER"),
+            password=os.getenv("MYSQL_PASSWORD"),
+            database=os.getenv("MYSQL_DATABASE"),
+            port=int(os.getenv("PORT"))
+        )
+        return connection
+    except mysql.connector.Error as err:
+        messagebox.showerror("Database Connection Error", f"Failed to connect to database: {err}")
+        return None
+
+# Initialize database and tables
+def initialize_database():
+    connection = get_db_connection()
+    if connection:
+        cursor = connection.cursor()
+        
+        # Create tables if they don't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                email VARCHAR(100) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL,
+                is_admin BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trains (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                train_number VARCHAR(20) UNIQUE NOT NULL,
+                train_name VARCHAR(100) NOT NULL,
+                total_seats_sleeper INT NOT NULL,
+                total_seats_ac INT NOT NULL,
+                total_seats_general INT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS schedules (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                train_id INT NOT NULL,
+                source VARCHAR(100) NOT NULL,
+                destination VARCHAR(100) NOT NULL,
+                departure_date DATE NOT NULL,
+                departure_time TIME NOT NULL,
+                arrival_date DATE NOT NULL,
+                arrival_time TIME NOT NULL,
+                fare_sleeper DECIMAL(10, 2) NOT NULL,
+                fare_ac DECIMAL(10, 2) NOT NULL,
+                fare_general DECIMAL(10, 2) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (train_id) REFERENCES trains(id) ON DELETE CASCADE
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bookings (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                schedule_id INT NOT NULL,
+                pnr VARCHAR(10) UNIQUE NOT NULL,
+                booking_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                total_fare DECIMAL(10, 2) NOT NULL,
+                status ENUM('confirmed', 'cancelled') DEFAULT 'confirmed',
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS passengers (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                booking_id INT NOT NULL,
+                name VARCHAR(100) NOT NULL,
+                age INT NOT NULL,
+                gender ENUM('male', 'female', 'other') NOT NULL,
+                seat_class ENUM('sleeper', 'ac', 'general') NOT NULL,
+                seat_number VARCHAR(10),
+                FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+            )
+        ''')
+        
+        # Insert sample admin and users if they don't exist
+        sample_users = [
+            ("Admin User", "sivaprakash7223@gmail.com", "siva@2006", True),
+            ("Rohith", "rohith7223@gmail.com", "rohith@2006", False),
+            ("Kamal", "kamal7223@gmail.com", "kamal@2006", False),
+            ("Nithish", "nithish7223@gmail.com", "nithish@2006", False),
+            ("Rajasekar", "rajasekar7223@gmail.com", "rjk@2006", False)
+        ]
+        
+        for name, email, password, is_admin in sample_users:
+            # Check if user already exists
+            cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+            if not cursor.fetchone():
+                # Hash the password
+                hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+                cursor.execute(
+                    "INSERT INTO users (name, email, password, is_admin) VALUES (%s, %s, %s, %s)",
+                    (name, email, hashed_password, is_admin)
+                )
+        
+        connection.commit()
+        cursor.close()
+        connection.close()
+        return True
+    return False
+
+# Helper functions
+def generate_pnr():
+    """Generate a random 10-character PNR number"""
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+
+def validate_email(email):
+    """Validate email format"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+# Main Application
+class RailwayReservationSystem:
+    def __init__(self):
+
+        self.app = ctk.CTk()
+        self.app.title("Railway Reservation System")
+        self.app.geometry("1000x600")
+        self.app.resizable(True, True)
+
+        self.app.iconbitmap("assets/train_icon.ico")
+        
+        # Set appearance mode and color theme
+        ctk.set_appearance_mode("light")
+        ctk.set_default_color_theme("green")
+        
+        # Current user data
+        self.current_user = None
+        
+        # Initialize database
+        if not initialize_database():
+            self.app.destroy()
+            return
+        
+        # Show login screen
+        self.show_login_screen()
+    
+    def show_login_screen(self):
+        # Clear the window
+        for widget in self.app.winfo_children():
+            widget.destroy()
+        
+        # Create login frame
+        login_frame = ctk.CTkFrame(self.app)
+        login_frame.pack(pady=20, padx=40, fill="both", expand=True)
+        
+        # Title
+        title_label = ctk.CTkLabel(login_frame, text="🚄 Railway Reservation System", font=ctk.CTkFont(size=24, weight="bold"))
+        title_label.pack(pady=12, padx=10)
+        
+        # Login form
+        login_form = ctk.CTkFrame(login_frame)
+        login_form.pack(pady=20, padx=60, fill="both", expand=True)
+        
+        # Email
+        email_label = ctk.CTkLabel(login_form, text="Email:")
+        email_label.pack(pady=(20, 5), padx=10, anchor="w")
+        
+        email_entry = ctk.CTkEntry(login_form, width=300, placeholder_text="Enter your email")
+        email_entry.pack(pady=5, padx=10)
+        
+        # Password
+        password_label = ctk.CTkLabel(login_form, text="Password:")
+        password_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        password_entry = ctk.CTkEntry(login_form, width=300, placeholder_text="Enter your password", show="*")
+        password_entry.pack(pady=5, padx=10)
+        
+        # Login button
+        login_button = ctk.CTkButton(login_form, text="Login", command=lambda: self.login(email_entry.get(), password_entry.get()))
+        login_button.pack(pady=20, padx=10)
+        
+        # Register link
+        register_button = ctk.CTkButton(login_form, text="New User? Register", command=self.show_register_screen, fg_color="transparent", text_color=("blue", "#ADD8E6"))
+        register_button.pack(pady=5, padx=10)
+
+        
+    
+    def show_register_screen(self):
+        # Clear the window
+        for widget in self.app.winfo_children():
+            widget.destroy()
+        
+        # Create register frame
+        register_frame = ctk.CTkFrame(self.app)
+        register_frame.pack(pady=20, padx=40, fill="both", expand=True)
+        
+        # Title
+        title_label = ctk.CTkLabel(register_frame, text="Register New Account", font=ctk.CTkFont(size=24, weight="bold"))
+        title_label.pack(pady=12, padx=10)
+        
+        # Register form
+        register_form = ctk.CTkFrame(register_frame)
+        register_form.pack(pady=20, padx=60, fill="both", expand=True)
+        
+        # Name
+        name_label = ctk.CTkLabel(register_form, text="Full Name:")
+        name_label.pack(pady=(20, 5), padx=10, anchor="w")
+        
+        name_entry = ctk.CTkEntry(register_form, width=300, placeholder_text="Enter your full name")
+        name_entry.pack(pady=5, padx=10)
+        
+        # Email
+        email_label = ctk.CTkLabel(register_form, text="Email:")
+        email_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        email_entry = ctk.CTkEntry(register_form, width=300, placeholder_text="Enter your email")
+        email_entry.pack(pady=5, padx=10)
+        
+        # Password
+        password_label = ctk.CTkLabel(register_form, text="Password:")
+        password_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        password_entry = ctk.CTkEntry(register_form, width=300, placeholder_text="Enter your password", show="*")
+        password_entry.pack(pady=5, padx=10)
+        
+        # Confirm Password
+        confirm_password_label = ctk.CTkLabel(register_form, text="Confirm Password:")
+        confirm_password_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        confirm_password_entry = ctk.CTkEntry(register_form, width=300, placeholder_text="Confirm your password", show="*")
+        confirm_password_entry.pack(pady=5, padx=10)
+        
+        # Register button
+        register_button = ctk.CTkButton(
+            register_form, 
+            text="Register", 
+            command=lambda: self.register(
+                name_entry.get(), 
+                email_entry.get(), 
+                password_entry.get(), 
+                confirm_password_entry.get()
+            )
+        )
+        register_button.pack(pady=20, padx=10)
+        
+        # Back to login link
+        back_button = ctk.CTkButton(register_form, text="Back to Login", command=self.show_login_screen, fg_color="transparent", text_color=("blue", "#ADD8E6"))
+        back_button.pack(pady=5, padx=10)
+    
+    def login(self, email, password):
+        if not email or not password:
+            messagebox.showerror("Login Error", "Please enter both email and password")
+            return
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                # Get user by email
+                cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+                user = cursor.fetchone()
+                
+                if user and bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
+                    self.current_user = user
+                    if user['is_admin']:
+                        self.show_admin_dashboard()
+                    else:
+                        self.show_user_dashboard()
+                else:
+                    messagebox.showerror("Login Error", "Invalid email or password")
+            except Exception as e:
+                messagebox.showerror("Login Error", f"An error occurred: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def register(self, name, email, password, confirm_password):
+        if not name or not email or not password or not confirm_password:
+            messagebox.showerror("Registration Error", "Please fill in all fields")
+            return
+        
+        if not validate_email(email):
+            messagebox.showerror("Registration Error", "Please enter a valid email address")
+            return
+        
+        if password != confirm_password:
+            messagebox.showerror("Registration Error", "Passwords do not match")
+            return
+        
+        if len(password) < 6:
+            messagebox.showerror("Registration Error", "Password must be at least 6 characters long")
+            return
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor()
+            
+            try:
+                # Check if email already exists
+                cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+                if cursor.fetchone():
+                    messagebox.showerror("Registration Error", "Email already registered")
+                    return
+                
+                # Hash the password
+                hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+                
+                # Insert new user
+                cursor.execute(
+                    "INSERT INTO users (name, email, password, is_admin) VALUES (%s, %s, %s, %s)",
+                    (name, email, hashed_password, False)
+                )
+                
+                connection.commit()
+                messagebox.showinfo("Registration Successful", "Your account has been created successfully. You can now login.")
+                self.show_login_screen()
+            except Exception as e:
+                connection.rollback()
+                messagebox.showerror("Registration Error", f"An error occurred: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def logout(self):
+        self.current_user = None
+        self.show_login_screen()
+    
+    # Admin Dashboard
+    def show_admin_dashboard(self):
+        # Clear the window
+        for widget in self.app.winfo_children():
+            widget.destroy()
+        
+        # Create main frame
+        main_frame = ctk.CTkFrame(self.app)
+        main_frame.pack(fill="both", expand=True)
+        
+        # Header frame
+        header_frame = ctk.CTkFrame(main_frame)
+        header_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Title and welcome message
+        title_label = ctk.CTkLabel(
+            header_frame, 
+            text=f"Admin Dashboard - Welcome, {self.current_user['name']}", 
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        title_label.pack(side="left", padx=10)
+        
+        # Logout button
+        logout_button = ctk.CTkButton(header_frame, text="Logout", command=self.logout, width=100)
+        logout_button.pack(side="right", padx=10)
+        
+        # Create tabview for different admin functions
+        tabview = ctk.CTkTabview(main_frame)
+        tabview.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Add tabs
+        tab_trains = tabview.add("Manage Trains")
+        tab_schedules = tabview.add("Manage Schedules")
+        tab_bookings = tabview.add("Today's Bookings")
+        tab_revenue = tabview.add("Revenue")
+        tab_passengers = tabview.add("Passenger List")
+        
+        # Configure tabs
+        self.setup_manage_trains_tab(tab_trains)
+        self.setup_manage_schedules_tab(tab_schedules)
+        self.setup_todays_bookings_tab(tab_bookings)
+        self.setup_revenue_tab(tab_revenue)
+        self.setup_passenger_list_tab(tab_passengers)
+    
+    def setup_manage_trains_tab(self, parent):
+        # Split into two frames
+        left_frame = ctk.CTkFrame(parent)
+        left_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        
+        right_frame = ctk.CTkFrame(parent)
+        right_frame.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+        
+        # Left frame - Add new train
+        add_train_label = ctk.CTkLabel(left_frame, text="Add New Train", font=ctk.CTkFont(size=16, weight="bold"))
+        add_train_label.pack(pady=10, padx=10)
+        
+        # Train Number
+        train_number_label = ctk.CTkLabel(left_frame, text="Train Number:")
+        train_number_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        train_number_entry = ctk.CTkEntry(left_frame, width=250)
+        train_number_entry.pack(pady=5, padx=10)
+        
+        # Train Name
+        train_name_label = ctk.CTkLabel(left_frame, text="Train Name:")
+        train_name_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        train_name_entry = ctk.CTkEntry(left_frame, width=250)
+        train_name_entry.pack(pady=5, padx=10)
+        
+        # Seats - Sleeper
+        seats_sleeper_label = ctk.CTkLabel(left_frame, text="Total Seats (Sleeper):")
+        seats_sleeper_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        seats_sleeper_entry = ctk.CTkEntry(left_frame, width=250)
+        seats_sleeper_entry.pack(pady=5, padx=10)
+        
+        # Seats - AC
+        seats_ac_label = ctk.CTkLabel(left_frame, text="Total Seats (AC):")
+        seats_ac_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        seats_ac_entry = ctk.CTkEntry(left_frame, width=250)
+        seats_ac_entry.pack(pady=5, padx=10)
+        
+        # Seats - General
+        seats_general_label = ctk.CTkLabel(left_frame, text="Total Seats (General):")
+        seats_general_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        seats_general_entry = ctk.CTkEntry(left_frame, width=250)
+        seats_general_entry.pack(pady=5, padx=10)
+        
+        # Add Train Button
+        add_train_button = ctk.CTkButton(
+            left_frame, 
+            text="Add Train", 
+            command=lambda: self.add_train(
+                train_number_entry.get(),
+                train_name_entry.get(),
+                seats_sleeper_entry.get(),
+                seats_ac_entry.get(),
+                seats_general_entry.get()
+            )
+        )
+        add_train_button.pack(pady=20, padx=10)
+        
+        # Right frame - Train list
+        trains_label = ctk.CTkLabel(right_frame, text="Existing Trains", font=ctk.CTkFont(size=16, weight="bold"))
+        trains_label.pack(pady=10, padx=10)
+        
+        # Create a scrollable frame for the train list
+        trains_scroll = ctk.CTkScrollableFrame(right_frame)
+        trains_scroll.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Refresh button
+        refresh_button = ctk.CTkButton(
+            right_frame, 
+            text="Refresh Train List", 
+            command=lambda: self.load_trains(trains_scroll)
+        )
+        refresh_button.pack(pady=10, padx=10)
+        
+        # Load trains
+        self.load_trains(trains_scroll)
+    
+    def load_trains(self, container):
+        # Clear the container
+        for widget in container.winfo_children():
+            widget.destroy()
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                cursor.execute("SELECT * FROM trains ORDER BY train_name")
+                trains = cursor.fetchall()
+                
+                if not trains:
+                    no_trains_label = ctk.CTkLabel(container, text="No trains found")
+                    no_trains_label.pack(pady=10, padx=10)
+                    return
+                
+                # Headers
+                header_frame = ctk.CTkFrame(container)
+                header_frame.pack(fill="x", padx=5, pady=5)
+                
+                ctk.CTkLabel(header_frame, text="Train Number", width=100).grid(row=0, column=0, padx=5, pady=5)
+                ctk.CTkLabel(header_frame, text="Train Name", width=150).grid(row=0, column=1, padx=5, pady=5)
+                ctk.CTkLabel(header_frame, text="Sleeper", width=70).grid(row=0, column=2, padx=5, pady=5)
+                ctk.CTkLabel(header_frame, text="AC", width=70).grid(row=0, column=3, padx=5, pady=5)
+                ctk.CTkLabel(header_frame, text="General", width=70).grid(row=0, column=4, padx=5, pady=5)
+                ctk.CTkLabel(header_frame, text="Actions", width=100).grid(row=0, column=5, padx=5, pady=5)
+                
+                # Train rows
+                for i, train in enumerate(trains):
+                    row_frame = ctk.CTkFrame(container)
+                    row_frame.pack(fill="x", padx=5, pady=2)
+                    
+                    ctk.CTkLabel(row_frame, text=train['train_number'], width=100).grid(row=0, column=0, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=train['train_name'], width=150).grid(row=0, column=1, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=str(train['total_seats_sleeper']), width=70).grid(row=0, column=2, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=str(train['total_seats_ac']), width=70).grid(row=0, column=3, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=str(train['total_seats_general']), width=70).grid(row=0, column=4, padx=5, pady=5)
+                    
+                    # Action buttons
+                    action_frame = ctk.CTkFrame(row_frame)
+                    action_frame.grid(row=0, column=5, padx=5, pady=5)
+                    
+                    edit_button = ctk.CTkButton(
+                        action_frame, 
+                        text="Edit", 
+                        width=70,
+                        command=lambda t=train: self.show_edit_train_dialog(t)
+                    )
+                    edit_button.grid(row=0, column=0, padx=2)
+                    
+                    delete_button = ctk.CTkButton(
+                        action_frame, 
+                        text="Delete", 
+                        width=70,
+                        fg_color="red",
+                        command=lambda t=train: self.delete_train(t['id'])
+                    )
+                    delete_button.grid(row=0, column=1, padx=2)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load trains: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def add_train(self, train_number, train_name, seats_sleeper, seats_ac, seats_general):
+        if not train_number or not train_name or not seats_sleeper or not seats_ac or not seats_general:
+            messagebox.showerror("Error", "Please fill in all fields")
+            return
+        
+        try:
+            seats_sleeper = int(seats_sleeper)
+            seats_ac = int(seats_ac)
+            seats_general = int(seats_general)
+            
+            if seats_sleeper <= 0 or seats_ac <= 0 or seats_general <= 0:
+                messagebox.showerror("Error", "Seat numbers must be positive integers")
+                return
+        except ValueError:
+            messagebox.showerror("Error", "Seat numbers must be integers")
+            return
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor()
+            
+            try:
+                # Check if train number already exists
+                cursor.execute("SELECT id FROM trains WHERE train_number = %s", (train_number,))
+                if cursor.fetchone():
+                    messagebox.showerror("Error", "Train number already exists")
+                    return
+                
+                # Insert new train
+                cursor.execute(
+                    "INSERT INTO trains (train_number, train_name, total_seats_sleeper, total_seats_ac, total_seats_general) VALUES (%s, %s, %s, %s, %s)",
+                    (train_number, train_name, seats_sleeper, seats_ac, seats_general)
+                )
+                
+                connection.commit()
+                messagebox.showinfo("Success", "Train added successfully")
+                
+                # Clear the form fields
+                for widget in cursor.description:
+                    if hasattr(widget, 'delete'):
+                        widget.delete(0, 'end')
+                
+                # Refresh the train list
+                for widget in self.app.winfo_children():
+                    if isinstance(widget, ctk.CTkScrollableFrame):
+                        self.load_trains(widget)
+            except Exception as e:
+                connection.rollback()
+                messagebox.showerror("Error", f"Failed to add train: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def show_edit_train_dialog(self, train):
+        # Create a dialog window
+        dialog = ctk.CTkToplevel(self.app)
+        dialog.title(f"Edit Train: {train['train_name']}")
+        dialog.geometry("400x400")
+        dialog.resizable(False, False)
+        dialog.grab_set()  # Make the dialog modal
+        
+        # Train Number
+        train_number_label = ctk.CTkLabel(dialog, text="Train Number:")
+        train_number_label.pack(pady=(20, 5), padx=10, anchor="w")
+        
+        train_number_entry = ctk.CTkEntry(dialog, width=300)
+        train_number_entry.insert(0, train['train_number'])
+        train_number_entry.pack(pady=5, padx=10)
+        
+        # Train Name
+        train_name_label = ctk.CTkLabel(dialog, text="Train Name:")
+        train_name_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        train_name_entry = ctk.CTkEntry(dialog, width=300)
+        train_name_entry.insert(0, train['train_name'])
+        train_name_entry.pack(pady=5, padx=10)
+        
+        # Seats - Sleeper
+        seats_sleeper_label = ctk.CTkLabel(dialog, text="Total Seats (Sleeper):")
+        seats_sleeper_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        seats_sleeper_entry = ctk.CTkEntry(dialog, width=300)
+        seats_sleeper_entry.insert(0, str(train['total_seats_sleeper']))
+        seats_sleeper_entry.pack(pady=5, padx=10)
+        
+        # Seats - AC
+        seats_ac_label = ctk.CTkLabel(dialog, text="Total Seats (AC):")
+        seats_ac_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        seats_ac_entry = ctk.CTkEntry(dialog, width=300)
+        seats_ac_entry.insert(0, str(train['total_seats_ac']))
+        seats_ac_entry.pack(pady=5, padx=10)
+        
+        # Seats - General
+        seats_general_label = ctk.CTkLabel(dialog, text="Total Seats (General):")
+        seats_general_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        seats_general_entry = ctk.CTkEntry(dialog, width=300)
+        seats_general_entry.insert(0, str(train['total_seats_general']))
+        seats_general_entry.pack(pady=5, padx=10)
+        
+        # Update Button
+        update_button = ctk.CTkButton(
+            dialog, 
+            text="Update Train", 
+            command=lambda: self.update_train(
+                train['id'],
+                train_number_entry.get(),
+                train_name_entry.get(),
+                seats_sleeper_entry.get(),
+                seats_ac_entry.get(),
+                seats_general_entry.get(),
+                dialog
+            )
+        )
+        update_button.pack(pady=20, padx=10)
+        
+        # Cancel Button
+        cancel_button = ctk.CTkButton(
+            dialog, 
+            text="Cancel", 
+            command=dialog.destroy,
+            fg_color="gray"
+        )
+        cancel_button.pack(pady=10, padx=10)
+    
+    def update_train(self, train_id, train_number, train_name, seats_sleeper, seats_ac, seats_general, dialog):
+        if not train_number or not train_name or not seats_sleeper or not seats_ac or not seats_general:
+            messagebox.showerror("Error", "Please fill in all fields")
+            return
+        
+        try:
+            seats_sleeper = int(seats_sleeper)
+            seats_ac = int(seats_ac)
+            seats_general = int(seats_general)
+            
+            if seats_sleeper <= 0 or seats_ac <= 0 or seats_general <= 0:
+                messagebox.showerror("Error", "Seat numbers must be positive integers")
+                return
+        except ValueError:
+            messagebox.showerror("Error", "Seat numbers must be integers")
+            return
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor()
+            
+            try:
+                # Check if train number already exists for another train
+                cursor.execute("SELECT id FROM trains WHERE train_number = %s AND id != %s", (train_number, train_id))
+                if cursor.fetchone():
+                    messagebox.showerror("Error", "Train number already exists for another train")
+                    return
+                
+                # Update train
+                # Update train
+                cursor.execute(
+                    "UPDATE trains SET train_number = %s, train_name = %s, total_seats_sleeper = %s, total_seats_ac = %s, total_seats_general = %s WHERE id = %s",
+                    (train_number, train_name, seats_sleeper, seats_ac, seats_general, train_id)
+                )
+                
+                connection.commit()
+                messagebox.showinfo("Success", "Train updated successfully")
+                dialog.destroy()
+                
+                # Refresh the train list
+                for widget in self.app.winfo_children():
+                    if isinstance(widget, ctk.CTkFrame):
+                        for child in widget.winfo_children():
+                            if isinstance(child, ctk.CTkScrollableFrame):
+                                self.load_trains(child)
+            except Exception as e:
+                connection.rollback()
+                messagebox.showerror("Error", f"Failed to update train: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def delete_train(self, train_id):
+        if messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this train? This will also delete all associated schedules and bookings."):
+            connection = get_db_connection()
+            if connection:
+                cursor = connection.cursor()
+                
+                try:
+                    # Delete train (cascading will handle related records)
+                    cursor.execute("DELETE FROM trains WHERE id = %s", (train_id,))
+                    connection.commit()
+                    messagebox.showinfo("Success", "Train deleted successfully")
+                    
+                    # Refresh the train list
+                    for widget in self.app.winfo_children():
+                        if isinstance(widget, ctk.CTkFrame):
+                            for child in widget.winfo_children():
+                                if isinstance(child, ctk.CTkScrollableFrame):
+                                    self.load_trains(child)
+                except Exception as e:
+                    connection.rollback()
+                    messagebox.showerror("Error", f"Failed to delete train: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()                
+    
+    def setup_manage_schedules_tab(self, parent):
+
+        parent.grid_columnconfigure(0, weight=0)  # Left column (small)
+        parent.grid_columnconfigure(1, weight=1)  # Right column (expands)
+        parent.grid_rowconfigure(0, weight=1)
+        # Split into two frames
+        left_scroll_frame = ctk.CTkScrollableFrame(parent, width=300)
+        left_scroll_frame.grid(row=0, column=0, sticky="nsw", padx=10, pady=10)
+
+        right_frame = ctk.CTkFrame(parent)
+        right_frame.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+
+        # Left frame - Add new schedule
+        add_schedule_label = ctk.CTkLabel(left_scroll_frame, text="Add New Schedule", font=ctk.CTkFont(size=16, weight="bold"))
+        add_schedule_label.pack(pady=10, padx=10)
+
+        train_label = ctk.CTkLabel(left_scroll_frame, text="Select Train:")
+        train_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        train_var = StringVar()
+        train_combo = ctk.CTkComboBox(left_scroll_frame, width=250, variable=train_var)
+        train_combo.pack(pady=5, padx=10)
+
+        self.load_trains_into_combobox(train_combo)
+
+        source_label = ctk.CTkLabel(left_scroll_frame, text="Source Station:")
+        source_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        source_entry = ctk.CTkEntry(left_scroll_frame, width=250)
+        source_entry.pack(pady=5, padx=10)
+
+        destination_label = ctk.CTkLabel(left_scroll_frame, text="Destination Station:")
+        destination_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        destination_entry = ctk.CTkEntry(left_scroll_frame, width=250)
+        destination_entry.pack(pady=5, padx=10)
+
+        departure_date_label = ctk.CTkLabel(left_scroll_frame, text="Departure Date:")
+        departure_date_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        departure_date_frame = ctk.CTkFrame(left_scroll_frame)
+        departure_date_frame.pack(pady=5, padx=10, fill="x")
+
+        departure_date_entry = DateEntry(departure_date_frame, width=12, background='darkblue', foreground='white', borderwidth=2)
+        departure_date_entry.pack(side="left", fill="x", expand=True)
+
+        departure_time_label = ctk.CTkLabel(left_scroll_frame, text="Departure Time (HH:MM):")
+        departure_time_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        departure_time_entry = ctk.CTkEntry(left_scroll_frame, width=250)
+        departure_time_entry.pack(pady=5, padx=10)
+
+        arrival_date_label = ctk.CTkLabel(left_scroll_frame, text="Arrival Date:")
+        arrival_date_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        arrival_date_frame = ctk.CTkFrame(left_scroll_frame)
+        arrival_date_frame.pack(pady=5, padx=10, fill="x")
+
+        arrival_date_entry = DateEntry(arrival_date_frame, width=12, background='darkblue', foreground='white', borderwidth=2)
+        arrival_date_entry.pack(side="left", fill="x", expand=True)
+
+        arrival_time_label = ctk.CTkLabel(left_scroll_frame, text="Arrival Time (HH:MM):")
+        arrival_time_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        arrival_time_entry = ctk.CTkEntry(left_scroll_frame, width=250)
+        arrival_time_entry.pack(pady=5, padx=10)
+
+        fare_sleeper_label = ctk.CTkLabel(left_scroll_frame, text="Fare (Sleeper):")
+        fare_sleeper_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        fare_sleeper_entry = ctk.CTkEntry(left_scroll_frame, width=250)
+        fare_sleeper_entry.pack(pady=5, padx=10)
+
+        fare_ac_label = ctk.CTkLabel(left_scroll_frame, text="Fare (AC):")
+        fare_ac_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        fare_ac_entry = ctk.CTkEntry(left_scroll_frame, width=250)
+        fare_ac_entry.pack(pady=5, padx=10)
+
+        fare_general_label = ctk.CTkLabel(left_scroll_frame, text="Fare (General):")
+        fare_general_label.pack(pady=(10, 5), padx=10, anchor="w")
+
+        fare_general_entry = ctk.CTkEntry(left_scroll_frame, width=250)
+        fare_general_entry.pack(pady=5, padx=10)
+
+        add_schedule_button = ctk.CTkButton(
+            left_scroll_frame, 
+            text="Add Schedule", 
+            command=lambda: self.add_schedule(
+                train_var.get(),
+                source_entry.get(),
+                destination_entry.get(),
+                departure_date_entry.get_date(),
+                departure_time_entry.get(),
+                arrival_date_entry.get_date(),
+                arrival_time_entry.get(),
+                fare_sleeper_entry.get(),
+                fare_ac_entry.get(),
+                fare_general_entry.get()
+            )
+        )
+        add_schedule_button.pack(pady=20, padx=10)
+
+        # Right frame - Schedule list
+        schedules_label = ctk.CTkLabel(right_frame, text="Existing Schedules", font=ctk.CTkFont(size=16, weight="bold"))
+        schedules_label.pack(pady=10, padx=10)
+
+        schedules_scroll = ctk.CTkScrollableFrame(right_frame)
+        schedules_scroll.pack(fill="both", expand=True, padx=10, pady=10)
+
+        refresh_button = ctk.CTkButton(
+            right_frame, 
+            text="Refresh Schedule List", 
+            command=lambda: self.load_schedules(schedules_scroll)
+        )
+        refresh_button.pack(pady=10, padx=10)
+
+        self.load_schedules(schedules_scroll)
+
+
+    def load_trains_into_combobox(self, combobox):
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                cursor.execute("SELECT id, train_number, train_name FROM trains ORDER BY train_name")
+                trains = cursor.fetchall()
+                
+                # Format: "Train Number - Train Name"
+                train_options = [f"{train['train_number']} - {train['train_name']}" for train in trains]
+                
+                # Store the train data for later use
+                self.train_data = {f"{train['train_number']} - {train['train_name']}": train['id'] for train in trains}
+                
+                combobox.configure(values=train_options)
+                if train_options:
+                    combobox.set(train_options[0])
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load trains: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def add_schedule(self, train_option, source, destination, departure_date, departure_time, arrival_date, arrival_time, fare_sleeper, fare_ac, fare_general):
+        if not train_option or not source or not destination or not departure_time or not arrival_time or not fare_sleeper or not fare_ac or not fare_general:
+            messagebox.showerror("Error", "Please fill in all fields")
+            return
+        
+        try:
+            # Get train ID from the selected option
+            train_id = self.train_data.get(train_option)
+            if not train_id:
+                messagebox.showerror("Error", "Invalid train selection")
+                return
+            
+            # Validate time format (HH:MM)
+            time_pattern = re.compile(r'^([01]?[0-9]|2[0-3]):([0-5][0-9])$')
+            if not time_pattern.match(departure_time) or not time_pattern.match(arrival_time):
+                messagebox.showerror("Error", "Time must be in HH:MM format")
+                return
+            
+            # Validate fares
+            fare_sleeper = float(fare_sleeper)
+            fare_ac = float(fare_ac)
+            fare_general = float(fare_general)
+            
+            if fare_sleeper <= 0 or fare_ac <= 0 or fare_general <= 0:
+                messagebox.showerror("Error", "Fares must be positive numbers")
+                return
+            
+            # Format dates for MySQL
+            departure_date_str = departure_date.strftime('%Y-%m-%d')
+            arrival_date_str = arrival_date.strftime('%Y-%m-%d')
+            
+            connection = get_db_connection()
+            if connection:
+                cursor = connection.cursor()
+                
+                try:
+                    # Insert new schedule
+                    cursor.execute(
+                        """INSERT INTO schedules 
+                           (train_id, source, destination, departure_date, departure_time, 
+                            arrival_date, arrival_time, fare_sleeper, fare_ac, fare_general) 
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (train_id, source, destination, departure_date_str, departure_time, 
+                         arrival_date_str, arrival_time, fare_sleeper, fare_ac, fare_general)
+                    )
+                    
+                    connection.commit()
+                    messagebox.showinfo("Success", "Schedule added successfully")
+                    
+                    # Refresh the schedule list
+                    for widget in self.app.winfo_children():
+                        if isinstance(widget, ctk.CTkFrame):
+                            for child in widget.winfo_children():
+                                if isinstance(child, ctk.CTkScrollableFrame):
+                                    self.load_schedules(child)
+                except Exception as e:
+                    connection.rollback()
+                    messagebox.showerror("Error", f"Failed to add schedule: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid input: {str(e)}")
+    
+    def load_schedules(self, container):
+        # Clear the container
+        for widget in container.winfo_children():
+            widget.destroy()
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                cursor.execute("""
+                    SELECT s.*, t.train_number, t.train_name 
+                    FROM schedules s
+                    JOIN trains t ON s.train_id = t.id
+                    ORDER BY s.departure_date, s.departure_time
+                """)
+                schedules = cursor.fetchall()
+                
+                if not schedules:
+                    no_schedules_label = ctk.CTkLabel(container, text="No schedules found")
+                    no_schedules_label.pack(pady=10, padx=10)
+                    return
+                
+                # Headers
+                header_frame = ctk.CTkFrame(container)
+                header_frame.pack(fill="x", padx=5, pady=5)
+                
+                headers = ["Train", "Source", "Destination", "Departure", "Arrival", "Sleeper", "AC", "General", "Actions"]
+                widths = [150, 100, 100, 120, 120, 70, 70, 70, 100]
+                
+                for i, header in enumerate(headers):
+                    ctk.CTkLabel(header_frame, text=header, width=widths[i]).grid(row=0, column=i, padx=5, pady=5)
+                
+                # Schedule rows
+                for i, schedule in enumerate(schedules):
+                    row_frame = ctk.CTkFrame(container)
+                    row_frame.pack(fill="x", padx=5, pady=2)
+                    
+                    train_info = f"{schedule['train_number']} - {schedule['train_name']}"
+                    departure_info = f"{schedule['departure_date']} {schedule['departure_time']}"
+                    arrival_info = f"{schedule['arrival_date']} {schedule['arrival_time']}"
+                    
+                    ctk.CTkLabel(row_frame, text=train_info, width=widths[0]).grid(row=0, column=0, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=schedule['source'], width=widths[1]).grid(row=0, column=1, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=schedule['destination'], width=widths[2]).grid(row=0, column=2, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=departure_info, width=widths[3]).grid(row=0, column=3, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=arrival_info, width=widths[4]).grid(row=0, column=4, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=f"₹{schedule['fare_sleeper']}", width=widths[5]).grid(row=0, column=5, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=f"₹{schedule['fare_ac']}", width=widths[6]).grid(row=0, column=6, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=f"₹{schedule['fare_general']}", width=widths[7]).grid(row=0, column=7, padx=5, pady=5)
+                    
+                    # Action buttons
+                    action_frame = ctk.CTkFrame(row_frame)
+                    action_frame.grid(row=0, column=8, padx=5, pady=5)
+                    
+                    edit_button = ctk.CTkButton(
+                        action_frame, 
+                        text="Edit", 
+                        width=70,
+                        command=lambda s=schedule: self.show_edit_schedule_dialog(s)
+                    )
+                    edit_button.grid(row=0, column=0, padx=2)
+                    
+                    delete_button = ctk.CTkButton(
+                        action_frame, 
+                        text="Delete", 
+                        width=70,
+                        fg_color="red",
+                        command=lambda s=schedule: self.delete_schedule(s['id'])
+                    )
+                    delete_button.grid(row=0, column=1, padx=2)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load schedules: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def show_edit_schedule_dialog(self, schedule):
+        # Create a dialog window
+        dialog = ctk.CTkToplevel(self.app)
+        dialog.title(f"Edit Schedule")
+        dialog.geometry("500x650")
+        dialog.resizable(False, False)
+        dialog.grab_set()  # Make the dialog modal
+        
+        # Train selection
+        train_label = ctk.CTkLabel(dialog, text="Select Train:")
+        train_label.pack(pady=(20, 5), padx=10, anchor="w")
+        
+        train_var = StringVar()
+        train_combo = ctk.CTkComboBox(dialog, width=400, variable=train_var)
+        train_combo.pack(pady=5, padx=10)
+        
+        # Load trains into combobox
+        self.load_trains_into_combobox(train_combo)
+        
+        # Set the current train
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            try:
+                cursor.execute("SELECT train_number, train_name FROM trains WHERE id = %s", (schedule['train_id'],))
+                train = cursor.fetchone()
+                if train:
+                    train_option = f"{train['train_number']} - {train['train_name']}"
+                    train_combo.set(train_option)
+            finally:
+                cursor.close()
+                connection.close()
+        
+        # Source
+        source_label = ctk.CTkLabel(dialog, text="Source Station:")
+        source_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        source_entry = ctk.CTkEntry(dialog, width=400)
+        source_entry.insert(0, schedule['source'])
+        source_entry.pack(pady=5, padx=10)
+        
+        # Destination
+        destination_label = ctk.CTkLabel(dialog, text="Destination Station:")
+        destination_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        destination_entry = ctk.CTkEntry(dialog, width=400)
+        destination_entry.insert(0, schedule['destination'])
+        destination_entry.pack(pady=5, padx=10)
+        
+        # Departure Date
+        departure_date_label = ctk.CTkLabel(dialog, text="Departure Date:")
+        departure_date_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        departure_date_frame = ctk.CTkFrame(dialog)
+        departure_date_frame.pack(pady=5, padx=10, fill="x")
+        
+        departure_date = datetime.strptime(str(schedule['departure_date']), '%Y-%m-%d').date()
+        departure_date_entry = DateEntry(departure_date_frame, width=12, background='darkblue', foreground='white', borderwidth=2)
+        departure_date_entry.set_date(departure_date)
+        departure_date_entry.pack(side="left", fill="x", expand=True)
+        
+        # Departure Time
+        departure_time_label = ctk.CTkLabel(dialog, text="Departure Time (HH:MM):")
+        departure_time_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        departure_time_entry = ctk.CTkEntry(dialog, width=400)
+        departure_time_entry.insert(0, schedule['departure_time'])
+        departure_time_entry.pack(pady=5, padx=10)
+        
+        # Arrival Date
+        arrival_date_label = ctk.CTkLabel(dialog, text="Arrival Date:")
+        arrival_date_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        arrival_date_frame = ctk.CTkFrame(dialog)
+        arrival_date_frame.pack(pady=5, padx=10, fill="x")
+        
+        arrival_date = datetime.strptime(str(schedule['arrival_date']), '%Y-%m-%d').date()
+        arrival_date_entry = DateEntry(arrival_date_frame, width=12, background='darkblue', foreground='white', borderwidth=2)
+        arrival_date_entry.set_date(arrival_date)
+        arrival_date_entry.pack(side="left", fill="x", expand=True)
+        
+        # Arrival Time
+        arrival_time_label = ctk.CTkLabel(dialog, text="Arrival Time (HH:MM):")
+        arrival_time_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        arrival_time_entry = ctk.CTkEntry(dialog, width=400)
+        arrival_time_entry.insert(0, schedule['arrival_time'])
+        arrival_time_entry.pack(pady=5, padx=10)
+        
+        # Fares
+        fare_sleeper_label = ctk.CTkLabel(dialog, text="Fare (Sleeper):")
+        fare_sleeper_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        fare_sleeper_entry = ctk.CTkEntry(dialog, width=400)
+        fare_sleeper_entry.insert(0, str(schedule['fare_sleeper']))
+        fare_sleeper_entry.pack(pady=5, padx=10)
+        
+        fare_ac_label = ctk.CTkLabel(dialog, text="Fare (AC):")
+        fare_ac_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        fare_ac_entry = ctk.CTkEntry(dialog, width=400)
+        fare_ac_entry.insert(0, str(schedule['fare_ac']))
+        fare_ac_entry.pack(pady=5, padx=10)
+        
+        fare_general_label = ctk.CTkLabel(dialog, text="Fare (General):")
+        fare_general_label.pack(pady=(10, 5), padx=10, anchor="w")
+        
+        fare_general_entry = ctk.CTkEntry(dialog, width=400)
+        fare_general_entry.insert(0, str(schedule['fare_general']))
+        fare_general_entry.pack(pady=5, padx=10)
+        
+        # Update Button
+        update_button = ctk.CTkButton(
+            dialog, 
+            text="Update Schedule", 
+            command=lambda: self.update_schedule(
+                schedule['id'],
+                train_var.get(),
+                source_entry.get(),
+                destination_entry.get(),
+                departure_date_entry.get_date(),
+                departure_time_entry.get(),
+                arrival_date_entry.get_date(),
+                arrival_time_entry.get(),
+                fare_sleeper_entry.get(),
+                fare_ac_entry.get(),
+                fare_general_entry.get(),
+                dialog
+            )
+        )
+        update_button.pack(pady=20, padx=10)
+        
+        # Cancel Button
+        cancel_button = ctk.CTkButton(
+            dialog, 
+            text="Cancel", 
+            command=dialog.destroy,
+            fg_color="gray"
+        )
+        cancel_button.pack(pady=10, padx=10)
+    
+    def update_schedule(self, schedule_id, train_option, source, destination, departure_date, departure_time, arrival_date, arrival_time, fare_sleeper, fare_ac, fare_general, dialog):
+        if not train_option or not source or not destination or not departure_time or not arrival_time or not fare_sleeper or not fare_ac or not fare_general:
+            messagebox.showerror("Error", "Please fill in all fields")
+            return
+        
+        try:
+            # Get train ID from the selected option
+            train_id = self.train_data.get(train_option)
+            if not train_id:
+                messagebox.showerror("Error", "Invalid train selection")
+                return
+            
+            # Validate time format (HH:MM)
+            time_pattern = re.compile(r'^([01]?[0-9]|2[0-3]):([0-5][0-9])$')
+            if not time_pattern.match(departure_time) or not time_pattern.match(arrival_time):
+                messagebox.showerror("Error", "Time must be in HH:MM format")
+                return
+            
+            # Validate fares
+            fare_sleeper = float(fare_sleeper)
+            fare_ac = float(fare_ac)
+            fare_general = float(fare_general)
+            
+            if fare_sleeper <= 0 or fare_ac <= 0 or fare_general <= 0:
+                messagebox.showerror("Error", "Fares must be positive numbers")
+                return
+            
+            # Format dates for MySQL
+            departure_date_str = departure_date.strftime('%Y-%m-%d')
+            arrival_date_str = arrival_date.strftime('%Y-%m-%d')
+            
+            connection = get_db_connection()
+            if connection:
+                cursor = connection.cursor()
+                
+                try:
+                    # Update schedule
+                    cursor.execute(
+                        """UPDATE schedules SET 
+                           train_id = %s, source = %s, destination = %s, 
+                           departure_date = %s, departure_time = %s, 
+                           arrival_date = %s, arrival_time = %s, 
+                           fare_sleeper = %s, fare_ac = %s, fare_general = %s 
+                           WHERE id = %s""",
+                        (train_id, source, destination, 
+                         departure_date_str, departure_time, 
+                         arrival_date_str, arrival_time, 
+                         fare_sleeper, fare_ac, fare_general, 
+                         schedule_id)
+                    )
+                    
+                    connection.commit()
+                    messagebox.showinfo("Success", "Schedule updated successfully")
+                    dialog.destroy()
+                    
+                    # Refresh the schedule list
+                    for widget in self.app.winfo_children():
+                        if isinstance(widget, ctk.CTkFrame):
+                            for child in widget.winfo_children():
+                                if isinstance(child, ctk.CTkScrollableFrame):
+                                    self.load_schedules(child)
+                except Exception as e:
+                    connection.rollback()
+                    messagebox.showerror("Error", f"Failed to update schedule: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid input: {str(e)}")
+    def delete_schedule(self, schedule_id):
+        if messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this schedule? This will also delete all associated bookings."):
+            connection = get_db_connection()
+            if connection:
+                cursor = connection.cursor()
+                
+                try:
+                    # Delete schedule (cascading will handle related bookings)
+                    cursor.execute("DELETE FROM schedules WHERE id = %s", (schedule_id,))
+                    connection.commit()
+                    messagebox.showinfo("Success", "Schedule deleted successfully")
+                    
+                    # Refresh the schedule list
+                    for widget in self.app.winfo_children():
+                        if isinstance(widget, ctk.CTkFrame):
+                            for child in widget.winfo_children():
+                                if isinstance(child, ctk.CTkScrollableFrame):
+                                    self.load_schedules(child)
+                except Exception as e:
+                    connection.rollback()
+                    messagebox.showerror("Error", f"Failed to delete schedule: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+    
+    def setup_todays_bookings_tab(self, parent):
+        # Create a scrollable frame for the bookings list
+        bookings_scroll = ctk.CTkScrollableFrame(parent)
+        bookings_scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Refresh button
+        refresh_button = ctk.CTkButton(
+            parent, 
+            text="Refresh Bookings", 
+            command=lambda: self.load_todays_bookings(bookings_scroll)
+        )
+        refresh_button.pack(pady=10, padx=20)
+        
+        # Load today's bookings
+        self.load_todays_bookings(bookings_scroll)
+    
+    def load_todays_bookings(self, container):
+        # Clear the container
+        for widget in container.winfo_children():
+            widget.destroy()
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                # Get today's date
+                today = datetime.now().strftime('%Y-%m-%d')
+                
+                cursor.execute("""
+                    SELECT b.*, u.name as user_name, u.email as user_email,
+                           t.train_number, t.train_name, 
+                           s.source, s.destination, s.departure_date, s.departure_time
+                    FROM bookings b
+                    JOIN users u ON b.user_id = u.id
+                    JOIN schedules s ON b.schedule_id = s.id
+                    JOIN trains t ON s.train_id = t.id
+                    WHERE DATE(b.booking_date) = %s AND b.status = 'confirmed'
+                    ORDER BY b.booking_date DESC
+                """, (today,))
+                bookings = cursor.fetchall()
+                
+                if not bookings:
+                    no_bookings_label = ctk.CTkLabel(container, text="No bookings found for today")
+                    no_bookings_label.pack(pady=10, padx=10)
+                    return
+                
+                # Headers
+                header_frame = ctk.CTkFrame(container)
+                header_frame.pack(fill="x", padx=5, pady=5)
+                
+                headers = ["PNR", "User", "Train", "Journey", "Booking Time", "Fare", "Details"]
+                widths = [100, 150, 150, 200, 150, 80, 100]
+                
+                for i, header in enumerate(headers):
+                    ctk.CTkLabel(header_frame, text=header, width=widths[i]).grid(row=0, column=i, padx=5, pady=5)
+                
+                # Booking rows
+                for i, booking in enumerate(bookings):
+                    row_frame = ctk.CTkFrame(container)
+                    row_frame.pack(fill="x", padx=5, pady=2)
+                    
+                    user_info = f"{booking['user_name']}\n{booking['user_email']}"
+                    train_info = f"{booking['train_number']}\n{booking['train_name']}"
+                    journey_info = f"{booking['source']} → {booking['destination']}\n{booking['departure_date']} {booking['departure_time']}"
+                    booking_time = booking['booking_date'].strftime('%Y-%m-%d %H:%M')
+                    
+                    ctk.CTkLabel(row_frame, text=booking['pnr'], width=widths[0]).grid(row=0, column=0, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=user_info, width=widths[1]).grid(row=0, column=1, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=train_info, width=widths[2]).grid(row=0, column=2, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=journey_info, width=widths[3]).grid(row=0, column=3, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=booking_time, width=widths[4]).grid(row=0, column=4, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=f"₹{booking['total_fare']}", width=widths[5]).grid(row=0, column=5, padx=5, pady=5)
+                    
+                    # View details button
+                    details_button = ctk.CTkButton(
+                        row_frame, 
+                        text="View Details", 
+                        width=widths[6],
+                        command=lambda b=booking: self.show_booking_details(b)
+                    )
+                    details_button.grid(row=0, column=6, padx=5, pady=5)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load bookings: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def setup_revenue_tab(self, parent):
+        # Create frames for different time periods
+        daily_frame = ctk.CTkFrame(parent)
+        daily_frame.pack(fill="x", padx=20, pady=10)
+        
+        monthly_frame = ctk.CTkFrame(parent)
+        monthly_frame.pack(fill="x", padx=20, pady=10)
+        
+        yearly_frame = ctk.CTkFrame(parent)
+        yearly_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Daily revenue
+        daily_label = ctk.CTkLabel(daily_frame, text="Today's Revenue", font=ctk.CTkFont(size=16, weight="bold"))
+        daily_label.pack(pady=10, padx=10, side="left")
+        
+        daily_amount = self.get_revenue("daily")
+        daily_amount_label = ctk.CTkLabel(daily_frame, text=f"₹{daily_amount}", font=ctk.CTkFont(size=16))
+        daily_amount_label.pack(pady=10, padx=10, side="right")
+        
+        # Monthly revenue
+        monthly_label = ctk.CTkLabel(monthly_frame, text="This Month's Revenue", font=ctk.CTkFont(size=16, weight="bold"))
+        monthly_label.pack(pady=10, padx=10, side="left")
+        
+        monthly_amount = self.get_revenue("monthly")
+        monthly_amount_label = ctk.CTkLabel(monthly_frame, text=f"₹{monthly_amount}", font=ctk.CTkFont(size=16))
+        monthly_amount_label.pack(pady=10, padx=10, side="right")
+        
+        # Yearly revenue
+        yearly_label = ctk.CTkLabel(yearly_frame, text="This Year's Revenue", font=ctk.CTkFont(size=16, weight="bold"))
+        yearly_label.pack(pady=10, padx=10, side="left")
+        
+        yearly_amount = self.get_revenue("yearly")
+        yearly_amount_label = ctk.CTkLabel(yearly_frame, text=f"₹{yearly_amount}", font=ctk.CTkFont(size=16))
+        yearly_amount_label.pack(pady=10, padx=10, side="right")
+        
+        # Revenue by train
+        train_revenue_label = ctk.CTkLabel(parent, text="Revenue by Train", font=ctk.CTkFont(size=16, weight="bold"))
+        train_revenue_label.pack(pady=(20, 10), padx=20, anchor="w")
+        
+        # Create a scrollable frame for the train revenue list
+        train_revenue_scroll = ctk.CTkScrollableFrame(parent)
+        train_revenue_scroll.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # Load train revenue
+        self.load_train_revenue(train_revenue_scroll)
+        
+        # Refresh button
+        refresh_button = ctk.CTkButton(
+            parent, 
+            text="Refresh Revenue Data", 
+            command=lambda: self.refresh_revenue_data(
+                daily_amount_label, 
+                monthly_amount_label, 
+                yearly_amount_label, 
+                train_revenue_scroll
+            )
+        )
+        refresh_button.pack(pady=10, padx=20)
+    
+    def get_revenue(self, period):
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                today = datetime.now().date()
+                
+                if period == "daily":
+                    # Today's revenue
+                    cursor.execute("""
+                        SELECT SUM(total_fare) as revenue
+                        FROM bookings
+                        WHERE DATE(booking_date) = %s AND status = 'confirmed'
+                    """, (today,))
+                elif period == "monthly":
+                    # This month's revenue
+                    first_day = today.replace(day=1)
+                    cursor.execute("""
+                        SELECT SUM(total_fare) as revenue
+                        FROM bookings
+                        WHERE booking_date >= %s AND booking_date <= %s AND status = 'confirmed'
+                    """, (first_day, today))
+                elif period == "yearly":
+                    # This year's revenue
+                    first_day = today.replace(month=1, day=1)
+                    cursor.execute("""
+                        SELECT SUM(total_fare) as revenue
+                        FROM bookings
+                        WHERE booking_date >= %s AND booking_date <= %s AND status = 'confirmed'
+                    """, (first_day, today))
+                
+                result = cursor.fetchone()
+                revenue = result['revenue'] if result['revenue'] else 0
+                return f"{revenue:.2f}"
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to get revenue: {str(e)}")
+                return "0.00"
+            finally:
+                cursor.close()
+                connection.close()
+        return "0.00"
+    
+    def load_train_revenue(self, container):
+        # Clear the container
+        for widget in container.winfo_children():
+            widget.destroy()
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                cursor.execute("""
+                    SELECT t.train_number, t.train_name, SUM(b.total_fare) as revenue
+                    FROM bookings b
+                    JOIN schedules s ON b.schedule_id = s.id
+                    JOIN trains t ON s.train_id = t.id
+                    WHERE b.status = 'confirmed'
+                    GROUP BY t.id
+                    ORDER BY revenue DESC
+                """)
+                train_revenues = cursor.fetchall()
+                
+                if not train_revenues:
+                    no_data_label = ctk.CTkLabel(container, text="No revenue data available")
+                    no_data_label.pack(pady=10, padx=10)
+                    return
+                
+                # Headers
+                header_frame = ctk.CTkFrame(container)
+                header_frame.pack(fill="x", padx=5, pady=5)
+                
+                ctk.CTkLabel(header_frame, text="Train Number", width=150).grid(row=0, column=0, padx=5, pady=5)
+                ctk.CTkLabel(header_frame, text="Train Name", width=200).grid(row=0, column=1, padx=5, pady=5)
+                ctk.CTkLabel(header_frame, text="Total Revenue", width=150).grid(row=0, column=2, padx=5, pady=5)
+                
+                # Train revenue rows
+                for i, train in enumerate(train_revenues):
+                    row_frame = ctk.CTkFrame(container)
+                    row_frame.pack(fill="x", padx=5, pady=2)
+                    
+                    ctk.CTkLabel(row_frame, text=train['train_number'], width=150).grid(row=0, column=0, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=train['train_name'], width=200).grid(row=0, column=1, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=f"₹{train['revenue']:.2f}", width=150).grid(row=0, column=2, padx=5, pady=5)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load train revenue: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def refresh_revenue_data(self, daily_label, monthly_label, yearly_label, train_container):
+        daily_amount = self.get_revenue("daily")
+        daily_label.configure(text=f"₹{daily_amount}")
+        
+        monthly_amount = self.get_revenue("monthly")
+        monthly_label.configure(text=f"₹{monthly_amount}")
+        
+        yearly_amount = self.get_revenue("yearly")
+        yearly_label.configure(text=f"₹{yearly_amount}")
+        
+        self.load_train_revenue(train_container)
+    
+    def setup_passenger_list_tab(self, parent):
+        # Create a frame for train selection
+        selection_frame = ctk.CTkFrame(parent)
+        selection_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Train selection
+        train_label = ctk.CTkLabel(selection_frame, text="Select Train:")
+        train_label.pack(pady=10, padx=10, side="left")
+        
+        train_var = StringVar()
+        train_combo = ctk.CTkComboBox(selection_frame, width=300, variable=train_var)
+        train_combo.pack(pady=10, padx=10, side="left")
+        
+        # Load trains into combobox
+        self.load_trains_into_combobox(train_combo)
+        
+        # View button
+        view_button = ctk.CTkButton(
+            selection_frame, 
+            text="View Passengers", 
+            command=lambda: self.load_passengers_by_train(passengers_scroll, train_var.get())
+        )
+        view_button.pack(pady=10, padx=10, side="left")
+        
+        # Create a scrollable frame for the passenger list
+        passengers_scroll = ctk.CTkScrollableFrame(parent)
+        passengers_scroll.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # Initial message
+        initial_label = ctk.CTkLabel(passengers_scroll, text="Select a train and click 'View Passengers' to see the passenger list")
+        initial_label.pack(pady=20, padx=20)
+    
+    def load_passengers_by_train(self, container, train_option):
+        # Clear the container
+        for widget in container.winfo_children():
+            widget.destroy()
+        
+        if not train_option:
+            no_train_label = ctk.CTkLabel(container, text="Please select a train")
+            no_train_label.pack(pady=10, padx=10)
+            return
+        
+        # Get train ID from the selected option
+        train_id = self.train_data.get(train_option)
+        if not train_id:
+            messagebox.showerror("Error", "Invalid train selection")
+            return
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                cursor.execute("""
+                    SELECT p.*, b.pnr, u.name as booked_by, u.email as booked_by_email,
+                           s.source, s.destination, s.departure_date, s.departure_time
+                    FROM passengers p
+                    JOIN bookings b ON p.booking_id = b.id
+                    JOIN users u ON b.user_id = u.id
+                    JOIN schedules s ON b.schedule_id = s.id
+                    WHERE s.train_id = %s AND b.status = 'confirmed'
+                    ORDER BY s.departure_date, s.departure_time, p.name
+                """, (train_id,))
+                passengers = cursor.fetchall()
+                
+                if not passengers:
+                    no_passengers_label = ctk.CTkLabel(container, text="No passengers found for this train")
+                    no_passengers_label.pack(pady=10, padx=10)
+                    return
+                
+                # Group passengers by schedule
+                schedules = {}
+                for passenger in passengers:
+                    schedule_key = f"{passenger['source']} to {passenger['destination']} on {passenger['departure_date']} at {passenger['departure_time']}"
+                    if schedule_key not in schedules:
+                        schedules[schedule_key] = []
+                    schedules[schedule_key].append(passenger)
+                
+                # Display passengers by schedule
+                for schedule_key, schedule_passengers in schedules.items():
+                    # Schedule header
+                    schedule_frame = ctk.CTkFrame(container)
+                    schedule_frame.pack(fill="x", padx=5, pady=10)
+                    
+                    schedule_label = ctk.CTkLabel(
+                        schedule_frame, 
+                        text=schedule_key, 
+                        font=ctk.CTkFont(size=16, weight="bold")
+                    )
+                    schedule_label.pack(pady=10, padx=10)
+                    
+                    # Passenger table for this schedule
+                    passenger_table = ctk.CTkFrame(container)
+                    passenger_table.pack(fill="x", padx=5, pady=5)
+                    
+                    # Headers
+                    header_frame = ctk.CTkFrame(passenger_table)
+                    header_frame.pack(fill="x", padx=5, pady=5)
+                    
+                    headers = ["PNR", "Name", "Age", "Gender", "Class", "Seat", "Booked By"]
+                    widths = [100, 150, 50, 80, 80, 80, 200]
+                    
+                    for i, header in enumerate(headers):
+                        ctk.CTkLabel(header_frame, text=header, width=widths[i]).grid(row=0, column=i, padx=5, pady=5)
+                    
+                    # Passenger rows
+                    for i, passenger in enumerate(schedule_passengers):
+                        row_frame = ctk.CTkFrame(passenger_table)
+                        row_frame.pack(fill="x", padx=5, pady=2)
+                        
+                        booked_by_info = f"{passenger['booked_by']}\n{passenger['booked_by_email']}"
+                        
+                        ctk.CTkLabel(row_frame, text=passenger['pnr'], width=widths[0]).grid(row=0, column=0, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=passenger['name'], width=widths[1]).grid(row=0, column=1, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=str(passenger['age']), width=widths[2]).grid(row=0, column=2, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=passenger['gender'].capitalize(), width=widths[3]).grid(row=0, column=3, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=passenger['seat_class'].capitalize(), width=widths[4]).grid(row=0, column=4, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=passenger['seat_number'] or "Not Assigned", width=widths[5]).grid(row=0, column=5, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=booked_by_info, width=widths[6]).grid(row=0, column=6, padx=5, pady=5)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load passengers: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def show_booking_details(self, booking):
+        # Create a dialog window
+        dialog = ctk.CTkToplevel(self.app)
+        dialog.title(f"Booking Details - PNR: {booking['pnr']}")
+        dialog.geometry("600x500")
+        dialog.resizable(False, False)
+        dialog.grab_set()  # Make the dialog modal
+        
+        # Booking info frame
+        booking_info_frame = ctk.CTkFrame(dialog)
+        booking_info_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Train and journey details
+        train_info = f"{booking['train_number']} - {booking['train_name']}"
+        journey_info = f"{booking['source']} → {booking['destination']}"
+        date_info = f"Date: {booking['departure_date']} | Time: {booking['departure_time']}"
+        
+        train_label = ctk.CTkLabel(booking_info_frame, text=train_info, font=ctk.CTkFont(size=16, weight="bold"))
+        train_label.pack(pady=(10, 5), padx=10)
+        
+        journey_label = ctk.CTkLabel(booking_info_frame, text=journey_info, font=ctk.CTkFont(size=14))
+        journey_label.pack(pady=2, padx=10)
+        
+        date_label = ctk.CTkLabel(booking_info_frame, text=date_info, font=ctk.CTkFont(size=14))
+        date_label.pack(pady=(2, 10), padx=10)
+        
+        # Booking details
+        details_frame = ctk.CTkFrame(dialog)
+        details_frame.pack(fill="x", padx=20, pady=10)
+        
+        # PNR and booking time
+        pnr_label = ctk.CTkLabel(details_frame, text=f"PNR: {booking['pnr']}")
+        pnr_label.pack(pady=2, padx=10, anchor="w")
+        
+        booking_time = booking['booking_date'].strftime('%Y-%m-%d %H:%M:%S')
+        booking_time_label = ctk.CTkLabel(details_frame, text=f"Booking Time: {booking_time}")
+        booking_time_label.pack(pady=2, padx=10, anchor="w")
+        
+        # Booked by
+        booked_by_label = ctk.CTkLabel(details_frame, text=f"Booked By: {booking['user_name']} ({booking['user_email']})")
+        booked_by_label.pack(pady=2, padx=10, anchor="w")
+        
+        # Total fare
+        fare_label = ctk.CTkLabel(details_frame, text=f"Total Fare: ₹{booking['total_fare']}")
+        fare_label.pack(pady=2, padx=10, anchor="w")
+        
+        # Status
+        status_label = ctk.CTkLabel(details_frame, text=f"Status: {booking['status'].capitalize()}")
+        status_label.pack(pady=2, padx=10, anchor="w")
+        
+        # Passenger list
+        passengers_label = ctk.CTkLabel(dialog, text="Passenger Details", font=ctk.CTkFont(size=14, weight="bold"))
+        passengers_label.pack(pady=(20, 10), padx=20, anchor="w")
+        
+        # Create a scrollable frame for the passenger list
+        passengers_scroll = ctk.CTkScrollableFrame(dialog)
+        passengers_scroll.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # Load passengers for this booking
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                cursor.execute("""
+                    SELECT * FROM passengers
+                    WHERE booking_id = %s
+                    ORDER BY id
+                """, (booking['id'],))
+                passengers = cursor.fetchall()
+                
+                if not passengers:
+                    no_passengers_label = ctk.CTkLabel(passengers_scroll, text="No passenger details found")
+                    no_passengers_label.pack(pady=10, padx=10)
+                else:
+                    # Headers
+                    header_frame = ctk.CTkFrame(passengers_scroll)
+                    header_frame.pack(fill="x", padx=5, pady=5)
+                    
+                    headers = ["Name", "Age", "Gender", "Class", "Seat Number"]
+                    widths = [150, 50, 80, 80, 100]
+                    
+                    for i, header in enumerate(headers):
+                        ctk.CTkLabel(header_frame, text=header, width=widths[i]).grid(row=0, column=i, padx=5, pady=5)
+                    
+                    # Passenger rows
+                    for i, passenger in enumerate(passengers):
+                        row_frame = ctk.CTkFrame(passengers_scroll)
+                        row_frame.pack(fill="x", padx=5, pady=2)
+                        
+                        ctk.CTkLabel(row_frame, text=passenger['name'], width=widths[0]).grid(row=0, column=0, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=str(passenger['age']), width=widths[1]).grid(row=0, column=1, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=passenger['gender'].capitalize(), width=widths[2]).grid(row=0, column=2, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=passenger['seat_class'].capitalize(), width=widths[3]).grid(row=0, column=3, padx=5, pady=5)
+                        ctk.CTkLabel(row_frame, text=passenger['seat_number'] or "Not Assigned", width=widths[4]).grid(row=0, column=4, padx=5, pady=5)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load passenger details: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+        
+        # Close button
+        close_button = ctk.CTkButton(dialog, text="Close", command=dialog.destroy)
+        close_button.pack(pady=20, padx=20)
+    # User Dashboard
+    def show_user_dashboard(self):
+        # Clear the window
+        for widget in self.app.winfo_children():
+            widget.destroy()
+        
+        # Create main frame
+        main_frame = ctk.CTkFrame(self.app)
+        main_frame.pack(fill="both", expand=True)
+        
+        # Header frame
+        header_frame = ctk.CTkFrame(main_frame)
+        header_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Title and welcome message
+        title_label = ctk.CTkLabel(
+            header_frame, 
+            text=f"👤 Welcome, {self.current_user['name']}", 
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        title_label.pack(side="left", padx=10)
+        
+        # Logout button
+        logout_button = ctk.CTkButton(header_frame, text="Logout", command=self.logout, width=100)
+        logout_button.pack(side="right", padx=10)
+        
+        # Create tabview for different user functions
+        tabview = ctk.CTkTabview(main_frame)
+        tabview.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Add tabs
+        tab_search = tabview.add("Search Trains")
+        tab_bookings = tabview.add("My Bookings")
+        
+        # Configure tabs
+        self.setup_search_trains_tab(tab_search)
+        self.setup_my_bookings_tab(tab_bookings)
+    
+    def setup_search_trains_tab(self, parent):
+        # Create search form
+        search_frame = ctk.CTkFrame(parent)
+        search_frame.pack(fill="x", padx=20, pady=20)
+        
+        # Source
+        source_label = ctk.CTkLabel(search_frame, text="📍 From:")
+        source_label.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        
+        source_entry = ctk.CTkEntry(search_frame, width=200)
+        source_entry.grid(row=0, column=1, padx=10, pady=10)
+        
+        # Destination
+        destination_label = ctk.CTkLabel(search_frame, text=" To:")
+        destination_label.grid(row=0, column=2, padx=10, pady=10, sticky="w")
+        
+        destination_entry = ctk.CTkEntry(search_frame, width=200)
+        destination_entry.grid(row=0, column=3, padx=10, pady=10)
+        
+        # Date
+        date_label = ctk.CTkLabel(search_frame, text="📅  Date:")
+        date_label.grid(row=1, column=0, padx=10, pady=10, sticky="w")
+        
+        date_frame = ctk.CTkFrame(search_frame)
+        date_frame.grid(row=1, column=1, padx=10, pady=10, sticky="w")
+        
+        date_entry = DateEntry(date_frame, width=12, background='darkblue', foreground='white', borderwidth=2)
+        date_entry.pack(fill="x", expand=True)
+        
+        # Search button
+        search_button = ctk.CTkButton(
+            search_frame, 
+            text="Search Trains", 
+            command=lambda: self.search_trains(
+                source_entry.get(),
+                destination_entry.get(),
+                date_entry.get_date(),
+                results_frame
+            )
+        )
+        search_button.grid(row=1, column=3, padx=10, pady=10)
+        
+        # Results frame
+        results_frame = ctk.CTkScrollableFrame(parent)
+        results_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # Initial message
+        initial_label = ctk.CTkLabel(results_frame, text="Enter source, destination, and date to search for trains")
+        initial_label.pack(pady=20, padx=20)
+    
+    def search_trains(self, source, destination, date, container):
+        # Clear the container
+        for widget in container.winfo_children():
+            widget.destroy()
+        
+        if not source or not destination:
+            no_input_label = ctk.CTkLabel(container, text="Please enter both source and destination")
+            no_input_label.pack(pady=10, padx=10)
+            return
+        
+        # Format date for MySQL
+        date_str = date.strftime('%Y-%m-%d')
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                cursor.execute("""
+                    SELECT s.*, t.train_number, t.train_name,
+                           t.total_seats_sleeper, t.total_seats_ac, t.total_seats_general
+                    FROM schedules s
+                    JOIN trains t ON s.train_id = t.id
+                    WHERE s.source LIKE %s AND s.destination LIKE %s AND s.departure_date = %s
+                    ORDER BY s.departure_time
+                """, (f"%{source}%", f"%{destination}%", date_str))
+                schedules = cursor.fetchall()
+                
+                if not schedules:
+                    no_trains_label = ctk.CTkLabel(container, text="No trains found for the selected route and date")
+                    no_trains_label.pack(pady=10, padx=10)
+                    return
+                
+                # Headers
+                header_frame = ctk.CTkFrame(container)
+                header_frame.pack(fill="x", padx=5, pady=5)
+                
+                headers = ["Train", "Departure", "Arrival", "Duration", "Sleeper", "AC", "General", "Book"]
+                widths = [200, 120, 120, 100, 80, 80, 80, 100]
+                
+                for i, header in enumerate(headers):
+                    ctk.CTkLabel(header_frame, text=header, width=widths[i]).grid(row=0, column=i, padx=5, pady=5)
+                
+                # Schedule rows
+                for i, schedule in enumerate(schedules):
+                    row_frame = ctk.CTkFrame(container)
+                    row_frame.pack(fill="x", padx=5, pady=2)
+                    
+                    train_info = f"{schedule['train_number']} - {schedule['train_name']}"
+                    departure_info = f"{schedule['departure_time']}"
+                    arrival_info = f"{schedule['arrival_time']}"
+                    
+                    # Calculate duration
+                    departure_datetime = datetime.combine(
+                        datetime.strptime(str(schedule['departure_date']), '%Y-%m-%d').date(),
+                        datetime.strptime(str(schedule['departure_time']), '%H:%M:%S').time()
+                    )
+                    arrival_datetime = datetime.combine(
+                        datetime.strptime(str(schedule['arrival_date']), '%Y-%m-%d').date(),
+                        datetime.strptime(str(schedule['arrival_time']), '%H:%M:%S').time()
+                    )
+                    duration = arrival_datetime - departure_datetime
+                    duration_hours = duration.days * 24 + duration.seconds // 3600
+                    duration_minutes = (duration.seconds % 3600) // 60
+                    duration_info = f"{duration_hours}h {duration_minutes}m"
+                    
+                    ctk.CTkLabel(row_frame, text=train_info, width=widths[0]).grid(row=0, column=0, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=departure_info, width=widths[1]).grid(row=0, column=1, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=arrival_info, width=widths[2]).grid(row=0, column=2, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=duration_info, width=widths[3]).grid(row=0, column=3, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=f"₹{schedule['fare_sleeper']}", width=widths[4]).grid(row=0, column=4, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=f"₹{schedule['fare_ac']}", width=widths[5]).grid(row=0, column=5, padx=5, pady=5)
+                    ctk.CTkLabel(row_frame, text=f"₹{schedule['fare_general']}", width=widths[6]).grid(row=0, column=6, padx=5, pady=5)
+                    
+                    # Book button
+                    book_button = ctk.CTkButton(
+                        row_frame, 
+                        text="Book Now", 
+                        width=widths[7],
+                        command=lambda s=schedule: self.show_booking_form(s)
+                    )
+                    book_button.grid(row=0, column=7, padx=5, pady=5)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to search trains: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def show_booking_form(self, schedule):
+        # Create a dialog window
+        dialog = ctk.CTkToplevel(self.app)
+        dialog.title(f"Book Ticket - {schedule['train_number']} {schedule['train_name']}")
+        dialog.geometry("600x700")
+        dialog.resizable(True, True)
+        dialog.grab_set()  # Make the dialog modal
+        
+        # Train and journey details
+        train_info = f"{schedule['train_number']} - {schedule['train_name']}"
+        journey_info = f"{schedule['source']} → {schedule['destination']}"
+        date_info = f"Date: {schedule['departure_date']} | Departure: {schedule['departure_time']} | Arrival: {schedule['arrival_time']}"
+        
+        train_label = ctk.CTkLabel(dialog, text=train_info, font=ctk.CTkFont(size=16, weight="bold"))
+        train_label.pack(pady=(20, 5), padx=20)
+        
+        journey_label = ctk.CTkLabel(dialog, text=journey_info, font=ctk.CTkFont(size=14))
+        journey_label.pack(pady=2, padx=20)
+        
+        date_label = ctk.CTkLabel(dialog, text=date_info, font=ctk.CTkFont(size=14))
+        date_label.pack(pady=(2, 20), padx=20)
+        
+        # Passenger details frame
+        passenger_frame = ctk.CTkFrame(dialog)
+        passenger_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Number of passengers
+        num_passengers_label = ctk.CTkLabel(passenger_frame, text="Number of Passengers:")
+        num_passengers_label.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        
+        num_passengers_var = IntVar(value=1)
+        num_passengers_menu = ctk.CTkOptionMenu(
+            passenger_frame, 
+            values=["1", "2", "3", "4", "5", "6"],
+            variable=num_passengers_var,
+            command=lambda value: self.update_passenger_forms(int(value), passenger_details_frame)
+        )
+        num_passengers_menu.grid(row=0, column=1, padx=10, pady=10, sticky="w")
+        
+        # Travel class
+        class_label = ctk.CTkLabel(passenger_frame, text="Travel Class:")
+        class_label.grid(row=0, column=2, padx=10, pady=10, sticky="w")
+        
+        class_var = StringVar(value="sleeper")
+        
+        class_frame = ctk.CTkFrame(passenger_frame)
+        class_frame.grid(row=0, column=3, padx=10, pady=10, sticky="w")
+        
+        sleeper_radio = ctk.CTkRadioButton(
+            class_frame, 
+            text=f"Sleeper (₹{schedule['fare_sleeper']})", 
+            variable=class_var, 
+            value="sleeper"
+        )
+        sleeper_radio.pack(side="left", padx=5)
+        
+        ac_radio = ctk.CTkRadioButton(
+            class_frame, 
+            text=f"AC (₹{schedule['fare_ac']})", 
+            variable=class_var, 
+            value="ac"
+        )
+        ac_radio.pack(side="left", padx=5)
+        
+        general_radio = ctk.CTkRadioButton(
+            class_frame, 
+            text=f"General (₹{schedule['fare_general']})", 
+            variable=class_var, 
+            value="general"
+        )
+        general_radio.pack(side="left", padx=5)
+        
+        # Passenger details
+        passenger_details_label = ctk.CTkLabel(dialog, text="Passenger Details", font=ctk.CTkFont(size=14, weight="bold"))
+        passenger_details_label.pack(pady=(20, 10), padx=20, anchor="w")
+        
+        # Scrollable frame for passenger forms
+        passenger_details_frame = ctk.CTkScrollableFrame(dialog, height=200)
+        passenger_details_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Initialize with one passenger form
+        self.update_passenger_forms(1, passenger_details_frame)
+        
+        # Total fare calculation
+        fare_frame = ctk.CTkFrame(dialog)
+        fare_frame.pack(fill="x", padx=20, pady=10)
+        
+        fare_label = ctk.CTkLabel(fare_frame, text="Total Fare:", font=ctk.CTkFont(size=14, weight="bold"))
+        fare_label.pack(side="left", padx=10, pady=10)
+        
+        fare_amount_label = ctk.CTkLabel(fare_frame, text="₹0.00", font=ctk.CTkFont(size=14))
+        fare_amount_label.pack(side="right", padx=10, pady=10)
+        
+        # Update fare when class or number of passengers changes
+        def update_fare(*args):
+            travel_class = class_var.get()
+            num_pass = int(num_passengers_var.get())
+            
+            if travel_class == "sleeper":
+                fare = float(schedule['fare_sleeper']) * num_pass
+            elif travel_class == "ac":
+                fare = float(schedule['fare_ac']) * num_pass
+            else:  # general
+                fare = float(schedule['fare_general']) * num_pass
+            
+            fare_amount_label.configure(text=f"₹{fare:.2f}")
+        
+        # Set up trace for variables
+        class_var.trace_add("write", update_fare)
+        num_passengers_var.trace_add("write", update_fare)
+        
+        # Initial fare update
+        update_fare()
+        
+        # Book button
+        book_button = ctk.CTkButton(
+            dialog, 
+            text="Book Ticket", 
+            command=lambda: self.book_ticket(
+                schedule,
+                class_var.get(),
+                passenger_details_frame,
+                fare_amount_label.cget("text").replace("₹", ""),
+                dialog
+            )
+        )
+        book_button.pack(pady=20, padx=20)
+        
+        # Cancel button
+        cancel_button = ctk.CTkButton(
+            dialog, 
+            text="Cancel", 
+            command=dialog.destroy,
+            fg_color="gray"
+        )
+        cancel_button.pack(pady=(0, 20), padx=20)
+    
+    def update_passenger_forms(self, num_passengers, container):
+        # Clear the container
+        for widget in container.winfo_children():
+            widget.destroy()
+        
+        # Create forms for each passenger
+        for i in range(num_passengers):
+            passenger_form = ctk.CTkFrame(container)
+            passenger_form.pack(fill="x", padx=5, pady=5)
+            
+            # Passenger number
+            passenger_num_label = ctk.CTkLabel(passenger_form, text=f"Passenger {i+1}", font=ctk.CTkFont(weight="bold"))
+            passenger_num_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+            
+            # Name
+            name_label = ctk.CTkLabel(passenger_form, text="Name:")
+            name_label.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+            
+            name_entry = ctk.CTkEntry(passenger_form, width=200)
+            name_entry.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+            
+            # Age
+            age_label = ctk.CTkLabel(passenger_form, text="Age:")
+            age_label.grid(row=1, column=2, padx=10, pady=5, sticky="w")
+            
+            age_entry = ctk.CTkEntry(passenger_form, width=50)
+            age_entry.grid(row=1, column=3, padx=10, pady=5, sticky="w")
+            
+            # Gender
+            gender_label = ctk.CTkLabel(passenger_form, text="Gender:")
+            gender_label.grid(row=2, column=0, padx=10, pady=5, sticky="w")
+            
+            gender_var = StringVar(value="male")
+            
+            gender_frame = ctk.CTkFrame(passenger_form)
+            gender_frame.grid(row=2, column=1, columnspan=3, padx=10, pady=5, sticky="w")
+            
+            male_radio = ctk.CTkRadioButton(gender_frame, text="Male", variable=gender_var, value="male")
+            male_radio.pack(side="left", padx=5)
+            
+            female_radio = ctk.CTkRadioButton(gender_frame, text="Female", variable=gender_var, value="female")
+            female_radio.pack(side="left", padx=5)
+            
+            other_radio = ctk.CTkRadioButton(gender_frame, text="Other", variable=gender_var, value="other")
+            other_radio.pack(side="left", padx=5)
+            
+            # Store references to form fields
+            passenger_form.name_entry = name_entry
+            passenger_form.age_entry = age_entry
+            passenger_form.gender_var = gender_var
+    
+    def book_ticket(self, schedule, travel_class, passenger_container, total_fare, dialog):
+        # Validate passenger details
+        passengers = []
+        
+        for passenger_form in passenger_container.winfo_children():
+            name = passenger_form.name_entry.get()
+            age = passenger_form.age_entry.get()
+            gender = passenger_form.gender_var.get()
+            
+            if not name or not age:
+                messagebox.showerror("Error", "Please fill in all passenger details")
+                return
+            
+            try:
+                age = int(age)
+                if age <= 0 or age > 120:
+                    messagebox.showerror("Error", "Please enter a valid age (1-120)")
+                    return
+            except ValueError:
+                messagebox.showerror("Error", "Age must be a number")
+                return
+            
+            passengers.append({
+                "name": name,
+                "age": age,
+                "gender": gender,
+                "seat_class": travel_class
+            })
+        
+        if not passengers:
+            messagebox.showerror("Error", "No passengers added")
+            return
+        
+        # Generate PNR
+        pnr = generate_pnr()
+        
+        # Book the ticket
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor()
+            
+            try:
+                # Start transaction
+                connection.start_transaction()
+                
+                # Insert booking
+                cursor.execute(
+                    "INSERT INTO bookings (user_id, schedule_id, pnr, total_fare) VALUES (%s, %s, %s, %s)",
+                    (self.current_user['id'], schedule['id'], pnr, total_fare)
+                )
+                
+                # Get booking ID
+                booking_id = cursor.lastrowid
+                
+                # Insert passengers
+                for passenger in passengers:
+                    # Generate a random seat number based on class
+                    if passenger["seat_class"] == "sleeper":
+                        seat_prefix = "S"
+                        max_seats = schedule['total_seats_sleeper']
+                    elif passenger["seat_class"] == "ac":
+                        seat_prefix = "A"
+                        max_seats = schedule['total_seats_ac']
+                    else:  # general
+                        seat_prefix = "G"
+                        max_seats = schedule['total_seats_general']
+                    
+                    seat_number = f"{seat_prefix}{random.randint(1, max_seats)}"
+                    
+                    cursor.execute(
+                        "INSERT INTO passengers (booking_id, name, age, gender, seat_class, seat_number) VALUES (%s, %s, %s, %s, %s, %s)",
+                        (booking_id, passenger["name"], passenger["age"], passenger["gender"], passenger["seat_class"], seat_number)
+                    )
+                
+                # Commit transaction
+                connection.commit()
+                
+                # Show success message
+                messagebox.showinfo("Booking Successful", f"Your ticket has been booked successfully!\nPNR: {pnr}")
+                
+                # Close dialog
+                dialog.destroy()
+                
+                # Refresh My Bookings tab if it's open
+                for widget in self.app.winfo_children():
+                    if isinstance(widget, ctk.CTkFrame):
+                        for child in widget.winfo_children():
+                            if isinstance(child, ctk.CTkTabview):
+                                for tab in child.winfo_children():
+                                    if isinstance(tab, ctk.CTkScrollableFrame) and tab.winfo_name() == "My Bookings":
+                                        self.load_my_bookings(tab)
+            except Exception as e:
+                connection.rollback()
+                messagebox.showerror("Booking Error", f"Failed to book ticket: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def setup_my_bookings_tab(self, parent):
+        # Create a scrollable frame for the bookings list
+        bookings_scroll = ctk.CTkScrollableFrame(parent)
+        bookings_scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Refresh button
+        refresh_button = ctk.CTkButton(
+            parent, 
+            text="Refresh Bookings", 
+            command=lambda: self.load_my_bookings(bookings_scroll)
+        )
+        refresh_button.pack(pady=10, padx=20)
+        
+        # Load user's bookings
+        self.load_my_bookings(bookings_scroll)
+    
+    def load_my_bookings(self, container):
+        # Clear the container
+        for widget in container.winfo_children():
+            widget.destroy()
+        
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            try:
+                cursor.execute("""
+                    SELECT b.*, t.train_number, t.train_name, 
+                           s.source, s.destination, s.departure_date, s.departure_time
+                    FROM bookings b
+                    JOIN schedules s ON b.schedule_id = s.id
+                    JOIN trains t ON s.train_id = t.id
+                    WHERE b.user_id = %s
+                    ORDER BY b.booking_date DESC
+                """, (self.current_user['id'],))
+                bookings = cursor.fetchall()
+                
+                if not bookings:
+                    no_bookings_label = ctk.CTkLabel(container, text="You have no bookings")
+                    no_bookings_label.pack(pady=10, padx=10)
+                    return
+                
+                # Group bookings by status
+                confirmed_bookings = [b for b in bookings if b['status'] == 'confirmed']
+                cancelled_bookings = [b for b in bookings if b['status'] == 'cancelled']
+                
+                # Display confirmed bookings
+                if confirmed_bookings:
+                    confirmed_label = ctk.CTkLabel(
+                        container, 
+                        text="Confirmed Bookings", 
+                        font=ctk.CTkFont(size=16, weight="bold")
+                    )
+                    confirmed_label.pack(pady=(10, 5), padx=10, anchor="w")
+                    
+                    self.display_bookings(container, confirmed_bookings)
+                
+                # Display cancelled bookings
+                if cancelled_bookings:
+                    cancelled_label = ctk.CTkLabel(
+                        container, 
+                        text="Cancelled Bookings", 
+                        font=ctk.CTkFont(size=16, weight="bold")
+                    )
+                    cancelled_label.pack(pady=(20, 5), padx=10, anchor="w")
+                    
+                    self.display_bookings(container, cancelled_bookings)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load bookings: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+    
+    def display_bookings(self, container, bookings):
+        for booking in bookings:
+            booking_frame = ctk.CTkFrame(container)
+            booking_frame.pack(fill="x", padx=10, pady=5)
+            
+            # Left side - Booking details
+            details_frame = ctk.CTkFrame(booking_frame)
+            details_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+            
+            # Train and journey info
+            train_info = f"{booking['train_number']} - {booking['train_name']}"
+            journey_info = f"{booking['source']} → {booking['destination']}"
+            date_info = f"Date: {booking['departure_date']} | Time: {booking['departure_time']}"
+            
+            train_label = ctk.CTkLabel(details_frame, text=train_info, font=ctk.CTkFont(weight="bold"))
+            train_label.pack(anchor="w", pady=2)
+            
+            journey_label = ctk.CTkLabel(details_frame, text=journey_info)
+            journey_label.pack(anchor="w", pady=2)
+            
+            date_label = ctk.CTkLabel(details_frame, text=date_info)
+            date_label.pack(anchor="w", pady=2)
+            
+            # PNR and booking time
+            pnr_label = ctk.CTkLabel(details_frame, text=f"PNR: {booking['pnr']}")
+            pnr_label.pack(anchor="w", pady=2)
+            
+            booking_time = booking['booking_date'].strftime('%Y-%m-%d %H:%M')
+            booking_time_label = ctk.CTkLabel(details_frame, text=f"Booked on: {booking_time}")
+            booking_time_label.pack(anchor="w", pady=2)
+            
+            # Fare
+            fare_label = ctk.CTkLabel(details_frame, text=f"Total Fare: ₹{booking['total_fare']}")
+            fare_label.pack(anchor="w", pady=2)
+            
+            # Right side - Actions
+            actions_frame = ctk.CTkFrame(booking_frame)
+            actions_frame.pack(side="right", fill="y", padx=10, pady=10)
+            
+            # View details button
+            view_button = ctk.CTkButton(
+                actions_frame, 
+                text="View Details", 
+                width=120,
+                command=lambda b=booking: self.show_booking_details(b)
+            )
+            view_button.pack(pady=5)
+            
+            # Cancel button (only for confirmed bookings)
+            if booking['status'] == 'confirmed':
+                # Check if departure date is in the future
+                departure_date = datetime.strptime(str(booking['departure_date']), '%Y-%m-%d').date()
+                if departure_date > datetime.now().date():
+                    cancel_button = ctk.CTkButton(
+                        actions_frame, 
+                        text="Cancel Booking", 
+                        width=120,
+                        fg_color="red",
+                        command=lambda b=booking: self.cancel_booking(b)
+                    )
+                    cancel_button.pack(pady=5)
+    
+    def cancel_booking(self, booking):
+        if messagebox.askyesno("Confirm Cancellation", "Are you sure you want to cancel this booking?"):
+            connection = get_db_connection()
+            if connection:
+                cursor = connection.cursor()
+                
+                try:
+                    # Update booking status
+                    cursor.execute(
+                        "UPDATE bookings SET status = 'cancelled' WHERE id = %s",
+                        (booking['id'],)
+                    )
+                    
+                    connection.commit()
+                    messagebox.showinfo("Cancellation Successful", "Your booking has been cancelled successfully")
+                    
+                    # Refresh My Bookings tab
+                    for widget in self.app.winfo_children():
+                        if isinstance(widget, ctk.CTkFrame):
+                            for child in widget.winfo_children():
+                                if isinstance(child, ctk.CTkTabview):
+                                    for tab in child.winfo_children():
+                                        if isinstance(tab, ctk.CTkScrollableFrame) and tab.winfo_name() == "My Bookings":
+                                            self.load_my_bookings(tab)
+                except Exception as e:
+                    connection.rollback()
+                    messagebox.showerror("Cancellation Error", f"Failed to cancel booking: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+# Run the application
+if __name__ == "__main__":
+    app = RailwayReservationSystem()
+    app.app.mainloop()
